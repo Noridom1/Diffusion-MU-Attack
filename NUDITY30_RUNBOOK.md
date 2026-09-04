@@ -36,10 +36,23 @@ bash scripts/nudity30_linux.sh attack
 bash scripts/nudity30_linux.sh evaluate
 ```
 
-`setup` downloads the Hugging Face SD v1.4 components and the authors' Google
-Drive “Others” bundle concurrently. It extracts the exact ESD checkpoint expected
-by the checked-in nudity configs. If Hugging Face requires authentication, run
+`setup` downloads the Hugging Face SD v1.4 components and the exact ESD checkpoint
+expected by the checked-in nudity configs concurrently. The checkpoint helper
+uses HTTP byte ranges, so it does **not** need to download or unpack the authors'
+25.5 GB Google Drive “Others” ZIP. If Hugging Face requires authentication, run
 `huggingface-cli login` inside the environment and repeat `setup`.
+
+If `esd_fmn_models.zip` has already been downloaded, do not unpack the whole
+archive. Once the ZIP is complete, stream only the needed member (this requires
+about 3.5 GiB of additional disk space):
+
+```bash
+unzip -p files/downloads/esd_fmn_models.zip \
+  files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt \
+  > files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt.part \
+  && mv files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt.part \
+        files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt
+```
 
 The single-command form is available, but the attack can take many hours:
 
