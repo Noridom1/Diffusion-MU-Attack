@@ -103,6 +103,27 @@ def _read_http_range(url: str, start: int, end: int) -> bytes:
     return data
 
 
+def _remote_size(url: str) -> int:
+    """Discover a Drive object's size; HEAD commonly reports zero for Drive."""
+    request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        status = getattr(response, "status", response.getcode())
+        if status != 206:
+            raise RuntimeError(
+                f"Google Drive did not honor size probe (HTTP {status})"
+            )
+        content_range = response.headers.get("Content-Range", "")
+        try:
+            total = int(content_range.rsplit("/", 1)[1])
+        except (IndexError, ValueError) as error:
+            raise RuntimeError(
+                f"Google Drive returned invalid Content-Range: {content_range!r}"
+            ) from error
+    if total <= 0:
+        raise RuntimeError(f"Google Drive returned invalid object size: {total}")
+    return total
+
+
 def _zip64_value(extra: bytes, fields: tuple[int, int, int], index: int) -> int:
     """Resolve a ZIP64 replacement for one central-directory field if needed."""
     if fields[index] != 0xFFFFFFFF:
@@ -167,9 +188,7 @@ def _find_checkpoint_entry(tail: bytes) -> tuple[int, int, int, int]:
 
 def _download_checkpoint_range(target: Path, download_dir: Path) -> None:
     """Extract the one needed checkpoint with HTTP ranges, without a 25 GB ZIP."""
-    head = urllib.request.Request(CHECKPOINT_DIRECT_URL, method="HEAD")
-    with urllib.request.urlopen(head, timeout=60) as response:
-        archive_size = int(response.headers["Content-Length"])
+    archive_size = _remote_size(CHECKPOINT_DIRECT_URL)
 
     tail_size = min(8 * 1024 * 1024, archive_size)
     tail_start = archive_size - tail_size
