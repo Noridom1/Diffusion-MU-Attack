@@ -11,15 +11,23 @@ from pathlib import Path
 import random
 import shutil
 import sys
+import struct
 import tarfile
+import urllib.request
+import zlib
 import zipfile
 
 
 MODEL_ID = "CompVis/stable-diffusion-v1-4"
 CHECKPOINT_NAME = "Nudity-ESDx1-UNET-SD.pt"
+CHECKPOINT_FILE_ID = "1yeZNJ8MoHsisdZmt5lbnG_kSgl5xned0"
 CHECKPOINT_URL = (
     "https://drive.google.com/file/d/"
-    "1yeZNJ8MoHsisdZmt5lbnG_kSgl5xned0/view?usp=sharing"
+    f"{CHECKPOINT_FILE_ID}/view?usp=sharing"
+)
+CHECKPOINT_DIRECT_URL = (
+    "https://drive.usercontent.google.com/download?"
+    f"id={CHECKPOINT_FILE_ID}&confirm=t"
 )
 
 
@@ -74,9 +82,159 @@ def _safe_extract_tar(archive: Path, destination: Path) -> None:
         bundle.extractall(destination)
 
 
-def download_checkpoint(args: argparse.Namespace) -> None:
-    import gdown
+def _read_http_range(url: str, start: int, end: int) -> bytes:
+    """Read one inclusive byte range and reject servers that ignore Range."""
+    request = urllib.request.Request(
+        url,
+        headers={"Range": f"bytes={start}-{end}"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        status = getattr(response, "status", response.getcode())
+        if status != 206:
+            raise RuntimeError(
+                f"Google Drive did not honor byte range {start}-{end} (HTTP {status})"
+            )
+        data = response.read()
+    expected = end - start + 1
+    if len(data) != expected:
+        raise RuntimeError(
+            f"Short byte range: expected {expected} bytes, received {len(data)}"
+        )
+    return data
 
+
+def _zip64_value(extra: bytes, fields: tuple[int, int, int], index: int) -> int:
+    """Resolve a ZIP64 replacement for one central-directory field if needed."""
+    if fields[index] != 0xFFFFFFFF:
+        return fields[index]
+    cursor = 0
+    while cursor + 4 <= len(extra):
+        header_id, size = struct.unpack_from("<HH", extra, cursor)
+        payload = extra[cursor + 4 : cursor + 4 + size]
+        cursor += 4 + size
+        if header_id != 0x0001:
+            continue
+        values = []
+        payload_cursor = 0
+        for field in fields:
+            if field == 0xFFFFFFFF:
+                if payload_cursor + 8 > len(payload):
+                    raise RuntimeError("Truncated ZIP64 extra field")
+                values.append(struct.unpack_from("<Q", payload, payload_cursor)[0])
+                payload_cursor += 8
+            else:
+                values.append(field)
+        return values[index]
+    raise RuntimeError("ZIP64 field is missing its ZIP64 extra data")
+
+
+def _find_checkpoint_entry(tail: bytes) -> tuple[int, int, int, int]:
+    """Return (method, compressed_size, uncompressed_size, local_offset)."""
+    central_signature = b"PK" + bytes((1, 2))
+    central_format = "<4s6H3L5H2L"
+    central_size = struct.calcsize(central_format)
+    matches = []
+    for cursor in range(0, max(0, len(tail) - central_size + 1)):
+        if tail[cursor : cursor + 4] != central_signature:
+            continue
+        fields = struct.unpack_from(central_format, tail, cursor)
+        filename_size, extra_size, comment_size = fields[10:13]
+        record_end = cursor + central_size + filename_size + extra_size + comment_size
+        if record_end > len(tail):
+            continue
+        filename_start = cursor + central_size
+        filename = tail[filename_start : filename_start + filename_size].decode(
+            "utf-8", "replace"
+        )
+        if Path(filename).name != CHECKPOINT_NAME:
+            continue
+        extra_start = filename_start + filename_size
+        extra = tail[extra_start : extra_start + extra_size]
+        matches.append(
+            (
+                fields[4],
+                _zip64_value(extra, (fields[9], fields[8], fields[16]), 1),
+                _zip64_value(extra, (fields[9], fields[8], fields[16]), 0),
+                _zip64_value(extra, (fields[9], fields[8], fields[16]), 2),
+            )
+        )
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"Expected one {CHECKPOINT_NAME} in ZIP central directory, found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _download_checkpoint_range(target: Path, download_dir: Path) -> None:
+    """Extract the one needed checkpoint with HTTP ranges, without a 25 GB ZIP."""
+    head = urllib.request.Request(CHECKPOINT_DIRECT_URL, method="HEAD")
+    with urllib.request.urlopen(head, timeout=60) as response:
+        archive_size = int(response.headers["Content-Length"])
+
+    tail_size = min(8 * 1024 * 1024, archive_size)
+    tail_start = archive_size - tail_size
+    tail = _read_http_range(CHECKPOINT_DIRECT_URL, tail_start, archive_size - 1)
+    method, compressed_size, uncompressed_size, local_offset = _find_checkpoint_entry(tail)
+    if method != 8:
+        raise RuntimeError(f"Unsupported ZIP compression method for {CHECKPOINT_NAME}: {method}")
+
+    local_header = _read_http_range(CHECKPOINT_DIRECT_URL, local_offset, local_offset + 65535)
+    local_format = "<4s5H3L2H"
+    local_size = struct.calcsize(local_format)
+    local_fields = struct.unpack_from(local_format, local_header, 0)
+    if local_fields[0] != b"PK" + bytes((3, 4)):
+        raise RuntimeError(f"Invalid ZIP local header at offset {local_offset}")
+    data_start = local_offset + local_size + local_fields[9] + local_fields[10]
+    data_end = data_start + compressed_size - 1
+    print(
+        f"Fetching {CHECKPOINT_NAME}: {compressed_size / (1024**3):.2f} GiB compressed, "
+        f"{uncompressed_size / (1024**3):.2f} GiB output"
+    )
+
+    download_dir.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + ".part")
+    if temporary.exists():
+        temporary.unlink()
+    request = urllib.request.Request(
+        CHECKPOINT_DIRECT_URL,
+        headers={"Range": f"bytes={data_start}-{data_end}"},
+    )
+    decompressor = zlib.decompressobj(-15)
+    digest = hashlib.sha256()
+    written = 0
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as handle:
+            status = getattr(response, "status", response.getcode())
+            if status != 206:
+                raise RuntimeError(f"Google Drive did not honor checkpoint range (HTTP {status})")
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output = decompressor.decompress(chunk)
+                if output:
+                    handle.write(output)
+                    digest.update(output)
+                    written += len(output)
+            output = decompressor.flush()
+            if output:
+                handle.write(output)
+                digest.update(output)
+                written += len(output)
+        if written != uncompressed_size:
+            raise RuntimeError(
+                f"Checkpoint size mismatch: expected {uncompressed_size}, received {written}"
+            )
+        temporary.replace(target)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    print(f"Checkpoint ready: {target}")
+    print(f"sha256 {digest.hexdigest()}  {target}")
+
+
+def download_checkpoint(args: argparse.Namespace) -> None:
     target = Path(args.target).resolve()
     if target.is_file() and target.stat().st_size > 0:
         print(f"Checkpoint already present: {target}")
@@ -85,46 +243,7 @@ def download_checkpoint(args: argparse.Namespace) -> None:
     if target.exists():
         raise RuntimeError(f"Checkpoint target exists but is empty or not a file: {target}")
 
-    download_dir = Path(args.download_dir).resolve()
-    extract_dir = download_dir / "others_extracted"
-    archive = download_dir / "esd_others_bundle.download"
-    download_dir.mkdir(parents=True, exist_ok=True)
-    extract_dir.mkdir(parents=True, exist_ok=True)
-
-    candidates = list(extract_dir.rglob(CHECKPOINT_NAME))
-    if not candidates:
-        if not archive.is_file():
-            result = gdown.download(
-                url=CHECKPOINT_URL,
-                output=str(archive),
-                quiet=False,
-                fuzzy=True,
-            )
-            if not result:
-                raise RuntimeError("Google Drive checkpoint download failed")
-
-        if zipfile.is_zipfile(archive):
-            _safe_extract_zip(archive, extract_dir)
-        elif tarfile.is_tarfile(archive):
-            _safe_extract_tar(archive, extract_dir)
-        else:
-            raise RuntimeError(
-                f"Downloaded bundle is not a supported ZIP/tar archive: {archive}"
-            )
-        candidates = list(extract_dir.rglob(CHECKPOINT_NAME))
-
-    if len(candidates) != 1:
-        pt_files = [str(path.relative_to(extract_dir)) for path in extract_dir.rglob("*.pt")]
-        preview = "\n".join(pt_files[:30]) or "(no .pt files found)"
-        raise RuntimeError(
-            f"Expected exactly one {CHECKPOINT_NAME}, found {len(candidates)}. "
-            f"Candidate .pt files:\n{preview}"
-        )
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(candidates[0], target)
-    print(f"Checkpoint ready: {target}")
-    print(f"sha256 {sha256(target)}  {target}")
+    _download_checkpoint_range(target, Path(args.download_dir).resolve())
 
 
 def select_subset(args: argparse.Namespace) -> None:
