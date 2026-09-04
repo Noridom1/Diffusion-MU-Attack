@@ -13,7 +13,6 @@ dependencies:
   # Newer MKL builds (>=2024) omit them and make `import torch` fail with
   # `undefined symbol: iJIT_NotifyEvent` on current Linux images.
   - mkl=2023.1.0
-  - intel-openmp=2023.1.0
   - numpy=1.23.5
   - pandas=2.0.3
   - onnxruntime=1.15.1=py310h8a9bb50_3_cuda
