@@ -9,6 +9,11 @@ dependencies:
   - pytorch=2.0.1
   - pytorch-cuda=11.8
   - torchvision=0.15.2
+  # PyTorch 2.0.1's CPU library expects the legacy Intel ITT symbols.
+  # Newer MKL builds (>=2024) omit them and make `import torch` fail with
+  # `undefined symbol: iJIT_NotifyEvent` on current Linux images.
+  - mkl=2023.1.0
+  - intel-openmp=2023.1.0
   - numpy=1.23.5
   - pandas=2.0.3
   - onnxruntime=1.15.1=py310h8a9bb50_3_cuda
