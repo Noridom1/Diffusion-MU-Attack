@@ -1,0 +1,31 @@
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10.12
+  - pip=23.2.1
+  - cudatoolkit=11.8.0
+  - pytorch=2.0.1
+  - pytorch-cuda=11.8
+  - torchvision=0.15.2
+  - numpy=1.23.5
+  - pandas=2.0.3
+  - onnxruntime=1.15.1=py310h8a9bb50_3_cuda
+  - tqdm=4.66.1
+  - accelerate=0.23.0
+  - terminaltables=3.1.10
+  - torchmetrics=1.1.2
+  - scipy=1.10.1
+  - pip:
+      - diffusers==0.21.1
+      # diffusers 0.21.1 still imports cached_download, removed in newer Hub releases.
+      - huggingface-hub==0.17.3
+      - omegaconf==2.3.0
+      - transformers==4.33.2
+      - opencv-python-headless==4.8.0.76
+      - gdown==5.2.0
+      # Pin the three mutable Git branches used by the upstream environment.
+      - git+https://github.com/Phoveran/fastargs.git@bbe56d147d71b7736b55e4f514249376c461ff67#egg=fastargs
+      - git+https://github.com/CompVis/taming-transformers.git@3ba01b241669f5ade541ce990f7650a3b8f65318#egg=taming-transformers
+      - git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6#egg=clip
