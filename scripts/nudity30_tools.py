@@ -29,6 +29,7 @@ CHECKPOINT_DIRECT_URL = (
     "https://drive.usercontent.google.com/download?"
     f"id={CHECKPOINT_FILE_ID}&confirm=t"
 )
+MAX_HTTP_RANGE = 4 * 1024 * 1024
 
 
 def sha256(path: Path) -> str:
@@ -82,30 +83,50 @@ def _safe_extract_tar(archive: Path, destination: Path) -> None:
         bundle.extractall(destination)
 
 
+def _iter_http_range(url: str, start: int, end: int):
+    """Yield an inclusive range in small requests accepted by Google Drive."""
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + MAX_HTTP_RANGE - 1, end)
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Range": f"bytes={cursor}-{chunk_end}",
+                "Accept-Encoding": "identity",
+                "User-Agent": "Mozilla/5.0",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=120) as response:
+            status = getattr(response, "status", response.getcode())
+            if status != 206:
+                raise RuntimeError(
+                    f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
+                )
+            data = response.read()
+        expected = chunk_end - cursor + 1
+        if len(data) != expected:
+            raise RuntimeError(
+                f"Short byte range: expected {expected} bytes, received {len(data)}"
+            )
+        yield data
+        cursor = chunk_end + 1
+
+
 def _read_http_range(url: str, start: int, end: int) -> bytes:
     """Read one inclusive byte range and reject servers that ignore Range."""
-    request = urllib.request.Request(
-        url,
-        headers={"Range": f"bytes={start}-{end}"},
-    )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        status = getattr(response, "status", response.getcode())
-        if status != 206:
-            raise RuntimeError(
-                f"Google Drive did not honor byte range {start}-{end} (HTTP {status})"
-            )
-        data = response.read()
-    expected = end - start + 1
-    if len(data) != expected:
-        raise RuntimeError(
-            f"Short byte range: expected {expected} bytes, received {len(data)}"
-        )
-    return data
+    return b"".join(_iter_http_range(url, start, end))
 
 
 def _remote_size(url: str) -> int:
     """Discover a Drive object's size; HEAD commonly reports zero for Drive."""
-    request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Range": "bytes=0-0",
+            "Accept-Encoding": "identity",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
     with urllib.request.urlopen(request, timeout=60) as response:
         status = getattr(response, "status", response.getcode())
         if status != 206:
@@ -215,22 +236,12 @@ def _download_checkpoint_range(target: Path, download_dir: Path) -> None:
     temporary = target.with_name(target.name + ".part")
     if temporary.exists():
         temporary.unlink()
-    request = urllib.request.Request(
-        CHECKPOINT_DIRECT_URL,
-        headers={"Range": f"bytes={data_start}-{data_end}"},
-    )
     decompressor = zlib.decompressobj(-15)
     digest = hashlib.sha256()
     written = 0
     try:
-        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as handle:
-            status = getattr(response, "status", response.getcode())
-            if status != 206:
-                raise RuntimeError(f"Google Drive did not honor checkpoint range (HTTP {status})")
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
+        with temporary.open("wb") as handle:
+            for chunk in _iter_http_range(CHECKPOINT_DIRECT_URL, data_start, data_end):
                 output = decompressor.decompress(chunk)
                 if output:
                     handle.write(output)
