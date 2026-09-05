@@ -14,7 +14,7 @@ sys.path.append('src')
 
 Section('overall', 'Overall configs').params(
     task = Param(OneOf(['classifier', 'sd_guidence','P4D','transfer']), required=True, desc='Task type to attack'),
-    attacker = Param(OneOf(['gcg', 'text_grad', 'hard_prompt', 'hard_prompt_multi','random', 'seed_search','no_attack']), required=True, desc='Attack algorithm'),
+    attacker = Param(OneOf(['gcg', 'text_grad', 'text_grad_eot', 'hard_prompt', 'hard_prompt_multi','random', 'seed_search','no_attack']), required=True, desc='Attack algorithm'),
     logger = Param(OneOf(['json', 'none']), default='none', desc='Logger to use'),
     resume = Param(Folder(), default=None, desc='Path to resume'),
     seed = Param(int, default=0, desc='Random seed'),
@@ -82,6 +82,18 @@ Section('attacker.text_grad', 'Text Gradient').enable_if(
     lr = Param(float, default=0.01, desc='Learning rate'),
     weight_decay = Param(float, default=0.1, desc='Weight decay'),
     rand_init = Param(BoolAsInt(), default=False, desc='Random initialization'),
+)
+
+Section('attacker.text_grad_eot', 'Text Gradient with timestep EOT').enable_if(
+    lambda cfg: cfg['overall.attacker'] == 'text_grad_eot'
+).params(
+    lr = Param(float, default=0.01, desc='Learning rate'),
+    weight_decay = Param(float, default=0.1, desc='Weight decay'),
+    rand_init = Param(BoolAsInt(), default=False, desc='Random initialization'),
+    timesteps_per_update = Param(int, default=3, desc='Number of sampled timesteps per optimizer update'),
+    eval_interval = Param(int, default=10, desc='Evaluate every N optimizer updates'),
+    early_stop = Param(BoolAsInt(), default=True, desc='Stop after the first successful evaluation'),
+    timestep_seed = Param(int, default=0, desc='Seed for the stratified timestep sampler'),
 )
 
 Section('logger', 'General logger configs').params(
