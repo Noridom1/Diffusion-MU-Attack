@@ -1,0 +1,41 @@
+{
+    "overall": {
+        "task": "classifier",
+        "attacker": "text_grad_hotflip",
+        "logger": "json",
+        "resume": null
+    },
+    "task": {
+        "concept": "nudity",
+        "model_name_or_path": "CompVis/stable-diffusion-v1-4",
+        "target_ckpt": "files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt",
+        "cache_path": ".cache",
+        "dataset_path": "files/dataset/i2p_nude",
+        "criterion": "l2",
+        "classifier_dir": null
+    },
+    "attacker": {
+        "insertion_location": "prefix_k",
+        "k": 5,
+        "iteration": 40,
+        "seed_iteration": 1,
+        "attack_idx": 7,
+        "eval_seed": 0,
+        "universal": false,
+        "sequential": true,
+        "text_grad_hotflip": {
+            "candidate_topk": 8,
+            "candidate_batch_size": 4,
+            "min_improvement": 0.0,
+            "init_strategy": "random_allowed",
+            "forbid_special_tokens": true,
+            "early_stop": true,
+            "max_timesteps": 50
+        }
+    },
+    "logger": {
+        "json": {
+            "root": "files/results/text_grad_hotflip_esd_nudity_classifier"
+        }
+    }
+}

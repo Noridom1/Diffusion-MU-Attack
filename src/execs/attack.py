@@ -14,7 +14,7 @@ sys.path.append('src')
 
 Section('overall', 'Overall configs').params(
     task = Param(OneOf(['classifier', 'sd_guidence','P4D','transfer']), required=True, desc='Task type to attack'),
-    attacker = Param(OneOf(['gcg', 'text_grad', 'text_grad_eot', 'hard_prompt', 'hard_prompt_multi','random', 'seed_search','no_attack']), required=True, desc='Attack algorithm'),
+    attacker = Param(OneOf(['gcg', 'text_grad', 'text_grad_eot', 'text_grad_hotflip', 'hard_prompt', 'hard_prompt_multi','random', 'seed_search','no_attack']), required=True, desc='Attack algorithm'),
     logger = Param(OneOf(['json', 'none']), default='none', desc='Logger to use'),
     resume = Param(Folder(), default=None, desc='Path to resume'),
     seed = Param(int, default=0, desc='Random seed'),
@@ -94,6 +94,18 @@ Section('attacker.text_grad_eot', 'Text Gradient with timestep EOT').enable_if(
     eval_interval = Param(int, default=10, desc='Evaluate every N optimizer updates'),
     early_stop = Param(BoolAsInt(), default=True, desc='Stop after the first successful evaluation'),
     timestep_seed = Param(int, default=0, desc='Seed for the stratified timestep sampler'),
+)
+
+Section('attacker.text_grad_hotflip', 'Text Gradient with discrete HotFlip').enable_if(
+    lambda cfg: cfg['overall.attacker'] == 'text_grad_hotflip'
+).params(
+    candidate_topk = Param(int, default=8, desc='Number of globally ranked token replacements'),
+    candidate_batch_size = Param(int, default=4, desc='Candidate prompts evaluated per U-Net batch'),
+    min_improvement = Param(float, default=0.0, desc='Minimum exact loss improvement to accept a flip'),
+    init_strategy = Param(OneOf(['random_allowed']), default='random_allowed', desc='Discrete prefix initialization'),
+    forbid_special_tokens = Param(BoolAsInt(), default=True, desc='Exclude tokenizer special tokens'),
+    early_stop = Param(BoolAsInt(), default=True, desc='Stop after the first successful evaluation'),
+    max_timesteps = Param(int, default=50, desc='Maximum sampled outer timesteps to evaluate'),
 )
 
 Section('logger', 'General logger configs').params(

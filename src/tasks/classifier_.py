@@ -73,18 +73,45 @@ class ClassifierTask:
             m.eval()
             m.requires_grad_(False)
 
-    def get_loss(self,x0,t,input_ids,input_embeddings,**kwargs):
+    def get_loss(self, x0, t, input_ids, input_embeddings, noise=None,
+                 reduction='mean', **kwargs):
+        """Compute the diffusion reconstruction loss.
+
+        ``noise`` and ``reduction`` are optional so the original attacker keeps
+        its behaviour.  Discrete candidate attacks can pass one shared noise
+        tensor and request one loss per candidate, which makes candidate
+        comparisons deterministic and fair.
+        """
+        if reduction not in ('mean', 'none'):
+            raise ValueError("reduction must be 'mean' or 'none'")
 
         x0 = x0.to(self.device)
-        x0 = x0.repeat(input_embeddings.shape[0], 1, 1, 1)
-        noise = torch.randn((1, 4, 64, 64), device=self.device)
-        noise = noise.repeat(input_embeddings.shape[0], 1, 1, 1)
+        batch_size = input_embeddings.shape[0]
+        x0 = x0.repeat(batch_size, 1, 1, 1)
+        if noise is None:
+            noise = torch.randn((1, 4, 64, 64), device=self.device)
+        else:
+            noise = noise.to(self.device)
+            if noise.ndim == 3:
+                noise = noise.unsqueeze(0)
+            if noise.ndim != 4:
+                raise ValueError("noise must have shape [batch, 4, 64, 64]")
+            if noise.shape[0] not in (1, batch_size):
+                raise ValueError(
+                    f"noise batch {noise.shape[0]} does not match prompt batch {batch_size}"
+                )
+        if noise.shape[0] == 1:
+            noise = noise.repeat(batch_size, 1, 1, 1)
         noised_latent = x0 * (self.scheduler.alphas_cumprod[t] ** 0.5).view(-1, 1, 1, 1).to(self.device) + \
                         noise * ((1 - self.scheduler.alphas_cumprod[t]) ** 0.5).view(-1, 1, 1, 1).to(self.device)
         encoder_hidden_states = self.custom_text_encoder(input_ids = input_ids,inputs_embeds=input_embeddings)[0]
         noise_pred = self.target_unet_sd(noised_latent,t,encoder_hidden_states=encoder_hidden_states).sample
-        error = self.criterion(noise,noise_pred)
-        return error
+        if isinstance(self.criterion, torch.nn.L1Loss):
+            error = F.l1_loss(noise_pred, noise, reduction='none')
+        else:
+            error = F.mse_loss(noise_pred, noise, reduction='none')
+        per_sample = error.flatten(start_dim=1).mean(dim=1)
+        return per_sample if reduction == 'none' else per_sample.mean()
 
     def str2id(self,prompt):
         text_input = self.tokenizer(
@@ -100,8 +127,11 @@ class ClassifierTask:
         return x0
     
     def id2embedding(self,input_ids):
-        input_one_hot = F.one_hot(input_ids.view(-1), num_classes = len(self.tokenizer.get_vocab())).float()
-        input_one_hot = torch.unsqueeze(input_one_hot,0).to(self.device)
+        if input_ids.ndim == 1:
+            input_ids = input_ids.unsqueeze(0)
+        input_one_hot = F.one_hot(
+            input_ids, num_classes=len(self.tokenizer.get_vocab())
+        ).float().to(self.device)
         input_embeds = input_one_hot @ self.all_embeddings
         return input_embeds
     
