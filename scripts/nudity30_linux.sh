@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reproducible 30-prompt ESD/nudity setup and two-GPU launcher.
+# Reproducible ESD/nudity setup and two-GPU launcher.  The default is the
+# deterministic stress20 case-list subset; set CASE_LIST= to use random mode.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,10 +10,17 @@ cd "$REPO_ROOT"
 ENV_NAME="${ENV_NAME:-ldm-nudity30}"
 GPU0="${GPU0:-0}"
 GPU1="${GPU1:-1}"
-N_PROMPTS="${N_PROMPTS:-30}"
+N_PROMPTS="${N_PROMPTS:-20}"
 SAMPLE_SEED="${SAMPLE_SEED:-2024}"
 RUN_SEED="${RUN_SEED:-0}"
-EXPERIMENT="nudity_n${N_PROMPTS}_sample${SAMPLE_SEED}_run${RUN_SEED}"
+SUBSET_TAG="${SUBSET_TAG:-stress20}"
+# Set CASE_LIST= (an explicitly empty value) to restore seeded-random mode.
+CASE_LIST="${CASE_LIST-prompts/nudity_stress20_case_numbers.txt}"
+if [[ -n "$CASE_LIST" ]]; then
+    EXPERIMENT="${EXPERIMENT:-nudity_${SUBSET_TAG}_run${RUN_SEED}}"
+else
+    EXPERIMENT="${EXPERIMENT:-nudity_n${N_PROMPTS}_sample${SAMPLE_SEED}_run${RUN_SEED}}"
+fi
 
 CACHE_DIR="${CACHE_DIR:-.cache}"
 CHECKPOINT="${CHECKPOINT:-files/pretrained/SD-1-4/ESD_ckpt/Nudity-ESDx1-UNET-SD.pt}"
@@ -37,17 +45,18 @@ Usage: bash scripts/nudity30_linux.sh COMMAND
 
 Commands:
   setup      Create the pinned Conda environment; download SD v1.4 and ESD checkpoint
-  select     Freeze a seeded random subset of 30 eligible prompts
-  prepare    Select prompts and generate 15 target images per GPU in parallel
+  select     Freeze the configured case-list (default) or seeded random subset
+  prepare    Select prompts and generate half the target images per GPU in parallel
   preflight  Verify GPUs, cached artifacts, subset, and prepared dataset
   baseline   Run no-attack evaluation, split across two GPUs
   attack     Run UnlearnDiff, split across two GPUs
-  evaluate   Validate all 30 result folders and print Pre-ASR/Post-ASR
+  evaluate   Validate all result folders and print Pre-ASR/Post-ASR
   all        setup -> prepare -> preflight -> baseline -> attack -> evaluate
 
 Environment overrides:
   ENV_NAME=$ENV_NAME  GPU0=$GPU0  GPU1=$GPU1
   N_PROMPTS=$N_PROMPTS  SAMPLE_SEED=$SAMPLE_SEED  RUN_SEED=$RUN_SEED
+  SUBSET_TAG=$SUBSET_TAG  CASE_LIST=$CASE_LIST
   CACHE_DIR=$CACHE_DIR  CHECKPOINT=$CHECKPOINT
 EOF
 }
@@ -115,13 +124,18 @@ setup_env() {
 
 select_prompts() {
     mkdir -p "$MANIFEST_DIR"
-    conda_python scripts/nudity30_tools.py select \
+    local -a selection_args=(
         --source prompts/nudity.csv \
         --output "$SUBSET_CSV" \
         --manifest "$SUBSET_MANIFEST" \
         --cache-dir "$CACHE_DIR" \
         --count "$N_PROMPTS" \
         --seed "$SAMPLE_SEED"
+    )
+    if [[ -n "$CASE_LIST" ]]; then
+        selection_args+=(--case-list "$CASE_LIST")
+    fi
+    conda_python scripts/nudity30_tools.py select "${selection_args[@]}"
 }
 
 prepare_images() {
@@ -157,13 +171,19 @@ prepare_images() {
 }
 
 preflight() {
-    CUDA_VISIBLE_DEVICES="$GPU0,$GPU1" conda_python scripts/nudity30_tools.py verify \
-        --cache-dir "$CACHE_DIR" \
-        --checkpoint "$CHECKPOINT" \
-        --subset "$SUBSET_CSV" \
-        --dataset "$DATASET_DIR" \
-        --expected-count "$N_PROMPTS" \
+    local -a verify_args=(
+        --cache-dir "$CACHE_DIR"
+        --checkpoint "$CHECKPOINT"
+        --subset "$SUBSET_CSV"
+        --dataset "$DATASET_DIR"
+        --expected-count "$N_PROMPTS"
         --require-two-gpus
+    )
+    if [[ -n "$CASE_LIST" ]]; then
+        verify_args+=(--case-list "$CASE_LIST")
+    fi
+    CUDA_VISIBLE_DEVICES="$GPU0,$GPU1" conda_python scripts/nudity30_tools.py verify \
+        "${verify_args[@]}"
 }
 
 archive_incomplete_run() {

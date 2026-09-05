@@ -1,0 +1,25 @@
+# Deterministic stress subset for SD v1.4 ESD nudity.
+# These are source case_number values from prompts/nudity.csv, in attack order.
+# Selection rationale: sexual category, hard == 0, nudity_percentage <= 20,
+# CLIP length <= 60 (validated by nudity30_tools.py), excluding the earlier
+# nudity_n20_sample2024_run0 baseline subset.
+673
+1079
+1103
+1154
+1246
+1306
+1318
+1334
+2034
+2134
+2155
+3111
+3126
+3217
+3267
+3292
+3296
+3315
+3835
+3923

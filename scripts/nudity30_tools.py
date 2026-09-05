@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small, deterministic helpers for the 30-prompt ESD/nudity experiment."""
+"""Deterministic helpers for the ESD/nudity subset experiments."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import subprocess
 import sys
 import struct
 import tarfile
@@ -88,22 +89,61 @@ def _iter_http_range(url: str, start: int, end: int):
     cursor = start
     while cursor <= end:
         chunk_end = min(cursor + MAX_HTTP_RANGE - 1, end)
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Range": f"bytes={cursor}-{chunk_end}",
-                "Accept-Encoding": "identity",
-                "User-Agent": "Mozilla/5.0",
-            },
-        )
-        with urllib.request.urlopen(request, timeout=120) as response:
-            status = getattr(response, "status", response.getcode())
-            if status != 206:
+        expected = chunk_end - cursor + 1
+        if shutil.which("curl"):
+            command = [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--range",
+                f"{cursor}-{chunk_end}",
+                "--write-out",
+                "%{stderr}%{http_code}",
+                "--output",
+                "-",
+                url,
+            ]
+            process = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            try:
+                assert process.stdout is not None
+                data = process.stdout.read(expected + 1)
+                if len(data) > expected:
+                    process.kill()
+                stderr = process.communicate(timeout=180)[1]
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.communicate()
+                raise RuntimeError(
+                    f"Timed out reading byte range {cursor}-{chunk_end}"
+                ) from error
+            if process.returncode not in (0, -9):
+                detail = stderr.decode("utf-8", "replace").strip()
+                raise RuntimeError(
+                    f"curl failed for byte range {cursor}-{chunk_end}: {detail}"
+                )
+            status = stderr.decode("utf-8", "replace").strip()[-3:]
+            if status != "206":
                 raise RuntimeError(
                     f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
                 )
-            data = response.read()
-        expected = chunk_end - cursor + 1
+        else:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "Range": f"bytes={cursor}-{chunk_end}",
+                    "Accept-Encoding": "identity",
+                    "User-Agent": "Mozilla/5.0",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                status = getattr(response, "status", response.getcode())
+                if status != 206:
+                    raise RuntimeError(
+                        f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
+                    )
+                data = response.read()
         if len(data) != expected:
             raise RuntimeError(
                 f"Short byte range: expected {expected} bytes, received {len(data)}"
@@ -276,6 +316,29 @@ def download_checkpoint(args: argparse.Namespace) -> None:
     _download_checkpoint_range(target, Path(args.download_dir).resolve())
 
 
+def _read_case_list(path: Path) -> list[int]:
+    """Read one source case_number per line, allowing comments and commas."""
+    values: list[int] = []
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        for token in line.replace(",", " ").split():
+            try:
+                values.append(int(token))
+            except ValueError as error:
+                raise RuntimeError(
+                    f"Invalid case_number {token!r} in {path} line {line_number}"
+                ) from error
+    if not values:
+        raise RuntimeError(f"Case list is empty: {path}")
+    if len(values) != len(set(values)):
+        raise RuntimeError(f"Case list contains duplicate case_number values: {path}")
+    return values
+
+
 def select_subset(args: argparse.Namespace) -> None:
     import pandas as pd
     from transformers import CLIPTokenizer
@@ -283,6 +346,7 @@ def select_subset(args: argparse.Namespace) -> None:
     source = Path(args.source).resolve()
     output = Path(args.output).resolve()
     manifest = Path(args.manifest).resolve()
+    case_list_arg = getattr(args, "case_list", None)
 
     if output.exists() or manifest.exists():
         if output.exists() and manifest.exists() and not args.force:
@@ -306,13 +370,46 @@ def select_subset(args: argparse.Namespace) -> None:
         for prompt in data["prompt"]
     ]
     eligible = [index for index, length in enumerate(token_lengths) if length <= 60]
-    if len(eligible) < args.count:
-        raise RuntimeError(
-            f"Only {len(eligible)} prompts meet the <=60-token constraint; "
-            f"cannot select {args.count}."
-        )
+    if case_list_arg:
+        case_list = Path(case_list_arg).resolve()
+        if not case_list.is_file():
+            raise RuntimeError(f"Missing case list: {case_list}")
+        requested_cases = _read_case_list(case_list)
+        if len(requested_cases) != args.count:
+            raise RuntimeError(
+                f"Case list contains {len(requested_cases)} IDs, expected {args.count}"
+            )
+        if "case_number" not in data.columns:
+            raise RuntimeError("Case-list selection requires a case_number column")
+        case_to_position: dict[int, int] = {}
+        for position, value in enumerate(data["case_number"].tolist()):
+            case_number = int(value)
+            if case_number in case_to_position:
+                raise RuntimeError(f"Duplicate source case_number in {source}: {case_number}")
+            case_to_position[case_number] = position
+        missing = [case for case in requested_cases if case not in case_to_position]
+        if missing:
+            raise RuntimeError(f"Case list IDs are absent from {source}: {missing}")
+        selected_positions = [case_to_position[case] for case in requested_cases]
+        ineligible = [
+            case for case, position in zip(requested_cases, selected_positions)
+            if position not in eligible
+        ]
+        if ineligible:
+            raise RuntimeError(
+                "Case list contains prompts over the CLIP <=60-token limit: "
+                f"{ineligible}"
+            )
+        selection_mode = "case_list"
+    else:
+        if len(eligible) < args.count:
+            raise RuntimeError(
+                f"Only {len(eligible)} prompts meet the <=60-token constraint; "
+                f"cannot select {args.count}."
+            )
+        selected_positions = random.Random(args.seed).sample(eligible, args.count)
+        selection_mode = "seeded_random"
 
-    selected_positions = random.Random(args.seed).sample(eligible, args.count)
     subset = data.iloc[selected_positions].copy().reset_index(drop=True)
     if "case_number" in subset.columns:
         original_case_numbers = [int(value) for value in subset["case_number"].tolist()]
@@ -331,12 +428,16 @@ def select_subset(args: argparse.Namespace) -> None:
         "source_sha256": sha256(source),
         "model_id": MODEL_ID,
         "eligibility": "CLIP input_ids length <= 60, matching src/tasks/utils/datasets.py",
+        "selection_mode": selection_mode,
         "sample_seed": args.seed,
         "count": args.count,
         "selected_source_rows_in_subset_order": selected_positions,
         "selected_source_case_numbers_in_subset_order": original_case_numbers,
         "token_lengths_in_subset_order": [token_lengths[i] for i in selected_positions],
     }
+    if case_list_arg:
+        payload["case_list"] = os.path.relpath(Path(case_list_arg).resolve(), Path.cwd())
+        payload["case_list_sha256"] = sha256(Path(case_list_arg).resolve())
     manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     midpoint = (args.count + 1) // 2
@@ -357,6 +458,8 @@ def verify(args: argparse.Namespace) -> None:
     checkpoint = Path(args.checkpoint).resolve()
     detector = Path(args.detector).resolve()
     subset = Path(args.subset).resolve() if args.subset else None
+    case_list_arg = getattr(args, "case_list", None)
+    case_list = Path(case_list_arg).resolve() if case_list_arg else None
     dataset = Path(args.dataset).resolve() if args.dataset else None
 
     print(f"torch={torch.__version__}, torch CUDA={torch.version.cuda}")
@@ -394,6 +497,21 @@ def verify(args: argparse.Namespace) -> None:
             expected = list(range(args.expected_count))
             if frame.get("case_number", pd.Series(dtype=int)).tolist() != expected:
                 failures.append("subset case_number must be exactly 0..N-1")
+            if case_list:
+                try:
+                    expected_source_cases = _read_case_list(case_list)
+                    actual_source_cases = [
+                        int(value)
+                        for value in frame.get(
+                            "source_case_number", pd.Series(dtype=int)
+                        ).tolist()
+                    ]
+                    if actual_source_cases != expected_source_cases:
+                        failures.append(
+                            "subset source_case_number does not match the configured case list"
+                        )
+                except (OSError, RuntimeError, ValueError) as error:
+                    failures.append(f"invalid case list: {error}")
             print(f"Subset rows: {len(frame)}")
 
     if dataset:
@@ -459,6 +577,13 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("--cache-dir", default=".cache")
     select.add_argument("--count", type=int, default=30)
     select.add_argument("--seed", type=int, default=2024)
+    select.add_argument(
+        "--case-list",
+        help=(
+            "Optional text file with source case_number IDs, one per line. "
+            "Selection follows file order instead of random sampling."
+        ),
+    )
     select.add_argument("--force", action="store_true")
     select.set_defaults(func=select_subset)
 
@@ -470,6 +595,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.add_argument("--detector", default="files/best.onnx")
     check.add_argument("--subset")
+    check.add_argument(
+        "--case-list",
+        help="Optional source case_number list that the subset must match exactly",
+    )
     check.add_argument("--dataset")
     check.add_argument("--expected-count", type=int, default=30)
     check.add_argument("--require-two-gpus", action="store_true")
