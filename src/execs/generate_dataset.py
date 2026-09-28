@@ -82,7 +82,12 @@ def generate_images(prompts_path, save_path, device='cuda:0', guidance_scale = 7
 
         num_inference_steps = ddim_steps           # Number of denoising steps
 
-        guidance_scale = row.sd_guidance_scale if hasattr(row, 'sd_guidance_scale') else guidance_scale            # Scale for classifier-free guidance
+        if hasattr(row, 'evaluation_guidance'):
+            row_guidance_scale = row.evaluation_guidance
+        elif hasattr(row, 'sd_guidance_scale'):
+            row_guidance_scale = row.sd_guidance_scale
+        else:
+            row_guidance_scale = guidance_scale
 
         generator = torch.manual_seed(seed)        # Seed generator to create the inital latent noise
 
@@ -126,7 +131,7 @@ def generate_images(prompts_path, save_path, device='cuda:0', guidance_scale = 7
 
             # perform guidance
             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+            noise_pred = noise_pred_uncond + row_guidance_scale * (noise_pred_text - noise_pred_uncond)
 
             # compute the previous noisy sample x_t -> x_t-1
             latents = scheduler.step(noise_pred, t, latents).prev_sample

@@ -5,3 +5,6 @@ archive/
 *.png
 *.out
 *.sb
+*.aux
+*.log
+.venv-report/

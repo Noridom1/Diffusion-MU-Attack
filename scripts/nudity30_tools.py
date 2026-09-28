@@ -350,6 +350,13 @@ def select_subset(args: argparse.Namespace) -> None:
 
     if output.exists() or manifest.exists():
         if output.exists() and manifest.exists() and not args.force:
+            frozen = pd.read_csv(output)
+            midpoint = (len(frozen) + 1) // 2
+            for shard, positions in enumerate((range(0, midpoint), range(midpoint, len(frozen)))):
+                shard_path = output.with_name(f"{output.stem}.shard{shard}.csv")
+                if not shard_path.exists():
+                    frozen.iloc[list(positions)].to_csv(shard_path, index=False)
+                    print(f"Restored missing shard {shard}: {shard_path}")
             print(f"Reusing frozen subset: {output}")
             return
         if not args.force:

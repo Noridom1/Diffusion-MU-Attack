@@ -1,0 +1,181 @@
+\documentclass[11pt,a4paper]{article}
+
+% Minimal standalone draft; replace this preamble with the course template later.
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+% Put censored PDF or PNG assets in figures/. Until then, use the .tex placeholders.
+\newcommand{\reportgraphic}[2]{%
+  \IfFileExists{figures/#1.pdf}{\includegraphics[width=.94\linewidth,height=#2,keepaspectratio]{figures/#1.pdf}}{%
+    \IfFileExists{figures/#1.png}{\includegraphics[width=.94\linewidth,height=#2,keepaspectratio]{figures/#1.png}}{%
+      \input{figures/#1.tex}%
+    }%
+  }%
+}
+
+\title{Concept Erasure and Adversarial Recovery in Diffusion Models:\\A Nudity-Focused Study of ESD and UnlearnDiffAtk}
+\author{Your name \\ Course and institution}
+\date{[Submission date]}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Text-to-image diffusion models can produce unwanted content, motivating methods that suppress a concept inside the model rather than only filtering its final output. This report studies nudity erasure by Erased Stable Diffusion (ESD) and adversarial recovery by UnlearnDiffAtk, also called a diffusion-model unlearning attack. We explain the defense, the white-box prompt attack, and a paired evaluation design. In an existing local 20-prompt run on an ESD checkpoint, the repository's broad NudeNet detection rate increased from 7/20 before attack to 17/20 after attack; a stricter exposed-region rule increased from 1/20 to 5/20 on the final images. A matched original Stable Diffusion baseline is still needed to quantify erasure itself. The results therefore show attack vulnerability under the stated detector and sample, not proof that all recovered images contain explicit nudity or that unlearning failed universally. All eventual example images in this report must be censored before publication.
+\end{abstract}
+
+\section{Introduction}
+Text-to-image diffusion models are useful because a short prompt can produce varied, realistic images. The same ability creates a safety problem when a user requests nudity or finds a prompt that elicits it indirectly. A post-generation filter can hide an output, but it does not change the image-generating model. Concept erasure instead modifies the model so that the unwanted visual concept is less likely to be generated in the first place \cite{esd}.
+
+An erasure method should be judged in two ways. First, does ordinary prompting produce fewer detections after editing? Second, does the edited model remain robust when an attacker actively searches for a prompt that restores the erased behavior? The second question is important in information security: a model that appears safe under straightforward tests may still expose the target concept under adaptive inputs \cite{unlearndiffatk}.
+
+This report restricts the target concept to nudity, the defense to ESD, and the attack to UnlearnDiffAtk. The central question is whether the ESD-edited model suppresses nudity under the original prompts and whether optimized prompts can recover it. Here ``erasure'' means an observed change in generated behavior, not a guarantee that a concept or training record has been removed from the weights. All generated examples included below are separate report copies masked using NudeNet bounding boxes; quantitative evaluation uses the raw images.
+
+\section{Background and threat model}
+\subsection{Text-conditioned latent diffusion}
+Stable Diffusion encodes images into a latent space and generates by iteratively denoising a random latent. At time step $t$, a U-Net predicts noise $\epsilon_\theta(z_t,c,t)$ from noisy latent $z_t$ and text condition $c$. Classifier-free guidance combines conditional and unconditional predictions to strengthen the effect of a prompt. Both methods in this report work with this denoising mechanism: ESD changes its weights, while the attack changes the text condition sent to the edited model.
+
+\subsection{Attacker and evaluation scope}
+The attacker has white-box access to the ESD checkpoint and may prepend five optimized tokens to a fixed original prompt. The attacker cannot change the victim weights or the evaluation rule. A target reference image is available for the attack objective. This is a stronger setting than merely trying a few manually written prompts, but it does not represent every possible adversary. We count an output as detected when NudeNet reports a selected class above threshold $0.45$. Detection is an operational proxy, not a human judgment of severity.
+
+\begin{figure}[t]
+\centering
+\reportgraphic{protocol}{2.2in}
+\caption{Evaluation flow. The original model and the ESD checkpoint must be sampled with matched prompts and generation settings. The attack changes only the prompt supplied to the ESD model. Score raw outputs before preparing masked report copies.}
+\label{fig:protocol}
+\end{figure}
+
+\section{Erasure method: Erased Stable Diffusion}
+ESD fine-tunes a pre-trained diffusion model to imitate a target noise prediction that points away from an unwanted concept \cite{esd}. Let $c_e$ denote the concept to erase, here nudity. With a frozen original model $\theta^*$, a simplified form of the target is
+\begin{equation}
+\epsilon_{\mathrm{target}}(z_t,c_e,t)
+=\epsilon_{\theta^*}(z_t,\emptyset,t)
+-\eta\bigl[\epsilon_{\theta^*}(z_t,c_e,t)
+-\epsilon_{\theta^*}(z_t,\emptyset,t)\bigr],
+\label{eq:esd}
+\end{equation}
+where $\eta$ controls erasure strength and $\emptyset$ is the empty condition. The edited U-Net is trained to match this target. Intuitively, the edit subtracts the model's learned direction associated with the concept. Unlike an inference-time negative prompt, the change is stored in model weights.
+
+The ESD paper distinguishes ESD-x, which updates cross-attention weights, from ESD-u, which updates non-cross-attention weights. The authors favor ESD-u for broad nudity suppression because the target concept may appear even when a prompt never names it \cite{esd}. Our repository loads a checkpoint named \texttt{Nudity-ESDx1-UNET-SD.pt}. Its name alone does not establish the exact training variant, so the experiments below refer to it as the supplied ESD nudity checkpoint until provenance is verified. A stronger edit may also alter benign images; utility therefore belongs in a full defense assessment, although it is not measured in the present local run.
+
+\section{Attack method: UnlearnDiffAtk}
+UnlearnDiffAtk searches for a text perturbation that makes an unlearned diffusion model generate a target concept again \cite{unlearndiffatk}. For a target image latent $z_0^*$, the method adds noise at sampled times and searches for an adversarial prompt $c_{\mathrm{adv}}$ that lowers the edited model's denoising error:
+\begin{equation}
+\min_{c_{\mathrm{adv}}}\;
+\mathbb{E}_{t,\epsilon}\left[
+\left\|\epsilon-
+\epsilon_{\theta_{\mathrm{ESD}}}(z_t^*,c_{\mathrm{adv}},t)\right\|_2^2
+\right].
+\label{eq:attack}
+\end{equation}
+This objective uses the victim model itself rather than a NudeNet gradient. A prompt whose denoising trajectory better fits the target latent is then tested by actual image generation. NudeNet judges the generated output afterward.
+
+In the local configuration, the attacker optimizes five prefix-token positions. The implementation uses a projected token distribution with Adam, an L2 denoising loss, 50 sampled diffusion times, up to 40 optimization steps per sampled time, learning rate $0.01$, and seed $0$. The attack iterates until its success check passes or its configured search is exhausted. These are attack-budget details, not properties of ESD itself. Figure~\ref{fig:protocol} separates the weight-edit stage from the prompt-optimization stage.
+
+\section{Experimental design}
+\subsection{Paired comparisons}
+The intended experiment has three conditions for each prompt $p_i$ and generation seed $s_i$:
+\begin{enumerate}
+\item Original Stable Diffusion v1.4 with $p_i$ (unedited baseline).
+\item The supplied ESD checkpoint with the same $p_i$ (erasure baseline).
+\item The same ESD checkpoint with an optimized prefix plus $p_i$ (attack output).
+\end{enumerate}
+Comparing conditions 1 and 2 measures erasure; comparing 2 and 3 measures attack recovery. Prompt, seed, image size, sampler, sampling steps, guidance, and detector must be aligned across conditions. The reference images used by the attacker must \emph{not} be substituted for condition 1, because they are attack targets, not necessarily outputs from the matched original model.
+
+\begin{table}[t]
+\centering
+\caption{Local setup and items to verify before final submission.}
+\label{tab:setup}
+\small
+\begin{tabular}{p{.31\linewidth}p{.61\linewidth}}
+\toprule
+Component & Setting \\
+\midrule
+Base model & \texttt{CompVis/stable-diffusion-v1-4} \\
+Erased model & Supplied \texttt{Nudity-ESDx1-UNET-SD.pt} U-Net; training variant and hash to verify \\
+Prompt sample & Seeded 20-prompt subset; sample seed 2024, run seed 0 \\
+Generation defaults & $512\times512$ pixels, 50 sampling steps, guidance 7.5; verify saved per-case overrides \\
+Attack & Five prefix tokens; 50 sampled times; 40 optimization steps/time; Adam, learning rate 0.01 \\
+Detector & NudeNet, score $>0.45$; broad and stricter class rules defined below \\
+Not yet available & Matched original-model image arm and checkpoint provenance \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The existing random subset contains 20 prompts, sampled with seed 2024 and evaluated with run seed 0. A separate 20-prompt stress set is useful as a secondary check but should not be pooled with this random set. The model sampler's defaults are 512-pixel square images, 50 inference steps, and guidance 7.5; the final manifest should confirm any per-prompt seed or guidance overrides. Table~\ref{tab:setup} records the reproducibility details currently known.
+
+\subsection{Metric and image safety}
+For $n$ prompts, define the detection rate as $n^{-1}\sum_{i=1}^n \mathbb{1}[\text{a selected NudeNet class for image }i\text{ scores}>0.45]$. The repository's \emph{broad} rule includes exposed feet, belly, armpits, and male chest in addition to exposed breasts, genitals, buttocks, and anus. This rule should be reported exactly because it determined attack success. We also show a \emph{stricter} descriptive rule limited to exposed female breast, female or male genitalia, buttocks, and anus. Neither metric alone proves what a human viewer would consider explicit nudity.
+
+Detector scoring must use the unmasked generated images. For publication, create separate copies with opaque, padded masks over every NudeNet exposed-region box, then manually inspect for missed sensitive regions. If coverage is uncertain, censor the entire person or omit the example. Apply this rule to \emph{every} figure column, including any original-model baseline. The masks are a presentation safeguard and must not change the quantitative scores.
+
+\section{Results}
+\subsection{Erasure under ordinary prompts: pending matched baseline}
+The decisive local erasure comparison requires original Stable Diffusion v1.4 images generated with the same prompts and seeds as the ESD baseline. Those matched original-model images are not yet present in this report. The observed ESD pre-attack rates in Table~\ref{tab:results} therefore cannot, by themselves, quantify the reduction caused by ESD. Figure~\ref{fig:erasure} reserves space for paired examples and should be filled only after the matched run. Show both a case where detection falls and a case where it does not; avoid selecting examples solely for visual drama.
+
+\begin{figure}[t]
+\centering
+\reportgraphic{erasure_pairs}{3.0in}
+\caption{Planned erasure pairs: original SD v1.4 versus ESD for identical prompts, seeds, and generation settings. Replace this placeholder with NudeNet-masked copies only. Include case IDs and raw-image detector labels in the final caption.}
+\label{fig:erasure}
+\end{figure}
+
+\subsection{Attack recovery on the ESD checkpoint}
+In the available seeded random 20-prompt run, the repository's broad NudeNet rule detected 7/20 ESD images before attack and 17/20 after attack. Ten of the 13 baseline failures became detected, or 10/13 (about 77\%). These paired counts are stronger evidence of recovery than the difference between the two percentages alone. Under the stricter exposed-region rule, final-image detections rose from 1/20 to 5/20, with four new detections. This stricter analysis is post hoc: the attack optimized and stopped under the broad rule. The separate stress set recorded 2/20 before and 16/20 after attack under the broad rule, with 14 new detections among 18 earlier failures. Because its prompts were selected differently, it is a secondary observation, not an additional 20 random trials.
+
+\begin{table}[t]
+\centering
+\caption{Existing local ESD attack outcomes. ``New'' counts previously undetected prompts that became detected. The original-model arm is pending, so this table measures attack recovery, not erasure magnitude.}
+\label{tab:results}
+\small
+\begin{tabular}{p{.37\linewidth}ccc}
+\toprule
+Set and detection rule & ESD before & ESD after & New / prior failures \\
+\midrule
+Random 20, broad & 7/20 (35\%) & 17/20 (85\%) & 10/13 (77\%) \\
+Random 20, stricter (post hoc) & 1/20 (5\%) & 5/20 (25\%) & 4/19 (21\%) \\
+Stress 20, broad & 2/20 (10\%) & 16/20 (80\%) & 14/18 (78\%) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:attack} shows the two conditions already available: ESD before attack and ESD after attack. Case 0 is a broad-rule recovery (\texttt{FEET\_EXPOSED}, 0.659), case 2 is a stricter-rule recovery (maximum score 0.803 for \texttt{FEMALE\_BREAST\_EXPOSED}), and case 7 is an attack failure with no broad-rule detection. These rows were selected by outcome category rather than visual appeal. The matched original-model column will be added after that run is completed. Figure~\ref{fig:rates} can summarize the final three-condition rates once the original-model arm is measured; do not infer or draw that missing bar now.
+
+\begin{figure}[t]
+\centering
+\reportgraphic{attack_triplets}{3.2in}
+\caption{Existing qualitative attack examples from the random 20-prompt run. Columns show ESD with the original prompt and the same ESD checkpoint after adversarial-prefix optimization. Opaque masks cover exposed-region boxes returned by NudeNet on separate report copies. Detector decisions and scores were computed on the unmasked images.}
+\label{fig:attack}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\reportgraphic{detection_rates}{2.2in}
+\caption{Planned quantitative plot for the random 20-prompt set: original SD, ESD before attack, and ESD after attack, each under broad and stricter NudeNet rules. The original-SD counts are deliberately blank until measured.}
+\label{fig:rates}
+\end{figure}
+
+\section{Discussion and limitations}
+The local attack result shows that optimized prompts can substantially increase the repository's NudeNet detections on the supplied ESD checkpoint. It does not yet establish how much this checkpoint improved over the original model, because the matched original-model arm is absent. It also does not show that 17 outputs contain explicit nudity: the broad rule counts several exposed but often non-explicit body regions. The stricter 5/20 result is a useful sensitivity check, but it was calculated after attack search under a different success condition.
+
+Several factors limit generalization. Twenty prompts give coarse five-percentage-point increments; the stress set is selected rather than random; stochastic sampling can change individual images; and NudeNet may produce false positives or negatives. A stronger evaluation would repeat seeds, audit detector labels by human review under a safe procedure, and measure image quality or prompt adherence. The result is best interpreted as a security warning about one checkpoint and one attack budget, not a universal failure rate for all unlearning methods.
+
+\section{Conclusion}
+ESD attempts to suppress a concept by changing diffusion-model weights. UnlearnDiffAtk probes whether an optimized prompt can still recover the target behavior. In the existing local run, attack-time broad NudeNet detections on ESD increased from 7/20 to 17/20; a stricter post-hoc rule increased from 1/20 to 5/20. The next required experiment is the matched original Stable Diffusion arm, which will let the report quantify erasure and attack recovery side by side. All illustrative outputs should be scored before censoring and shown only as masked copies.
+
+\section*{Remaining work before submission}
+Verify the checkpoint source and hash; generate original SD v1.4 images for the same 20 prompt/seed pairs without loading ESD weights; score all three arms with the same NudeNet version and class rules; export censored figure copies into \texttt{figures/}; replace the placeholders; and compare every figure caption against the per-image logs. Do not rerun the expensive attack unless artifacts are missing or the protocol changes.
+
+\begin{thebibliography}{9}
+\bibitem{esd} R. Gandikota, J. Materzynska, J. Fiotto-Kaufman, and D. Bau, ``Erasing Concepts from Diffusion Models,'' \emph{ICCV}, 2023. \url{https://arxiv.org/abs/2303.07345}.
+\bibitem{unlearndiffatk} Y. Zhang et al., ``To Generate or Not? Safety-Driven Unlearned Diffusion Models Are Still Easy To Generate Unsafe Images ... For Now,'' \emph{ECCV}, 2024. \url{https://arxiv.org/abs/2310.11868}.
+\bibitem{nudenet} NudeNet, project repository. \url{https://github.com/notAI-tech/NudeNet}.
+\end{thebibliography}
+
+\end{document}

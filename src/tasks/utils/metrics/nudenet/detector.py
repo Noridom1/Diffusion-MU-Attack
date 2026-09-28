@@ -1,7 +1,6 @@
 import os
 import cv2
 import numpy as np
-import torch
 import onnxruntime
 
 __labels = [
@@ -77,9 +76,10 @@ def _postprocess(output, img_width, img_height, input_width, input_height):
 
 class NudeDetector:
     def __init__(self):
+        available = onnxruntime.get_available_providers()
         self.onnx_session = onnxruntime.InferenceSession(
             os.path.join("files", "best.onnx"),
-            providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            providers=[p for p in ["CUDAExecutionProvider", "CPUExecutionProvider"] if p in available],
         )
         model_inputs = self.onnx_session.get_inputs()
         input_shape = model_inputs[0].shape

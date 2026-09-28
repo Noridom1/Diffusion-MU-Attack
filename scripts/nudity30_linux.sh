@@ -9,7 +9,8 @@ cd "$REPO_ROOT"
 
 ENV_NAME="${ENV_NAME:-ldm-nudity30}"
 GPU0="${GPU0:-0}"
-GPU1="${GPU1:-1}"
+# Leave GPU1 empty on single-GPU hosts such as Google Colab.
+GPU1="${GPU1-1}"
 N_PROMPTS="${N_PROMPTS:-20}"
 SAMPLE_SEED="${SAMPLE_SEED:-2024}"
 RUN_SEED="${RUN_SEED:-0}"
@@ -32,6 +33,8 @@ WORK_DIR="files/work/$EXPERIMENT"
 RESULT_ROOT="files/results/$EXPERIMENT"
 BASELINE_ROOT="$RESULT_ROOT/no_attack"
 ATTACK_ROOT="$RESULT_ROOT/unlearndiff"
+ORIGINAL_ROOT="$RESULT_ROOT/original_sd"
+ORIGINAL_WORK="$WORK_DIR/original_sd"
 
 BASELINE_CONFIG="configs/nudity/no_attack_esd_nudity_classifier.json"
 ATTACK_CONFIG="configs/nudity/text_grad_esd_nudity_classifier.json"
@@ -51,10 +54,13 @@ Commands:
   baseline   Run no-attack evaluation, split across two GPUs
   attack     Run UnlearnDiff, split across two GPUs
   evaluate   Validate all result folders and print Pre-ASR/Post-ASR
+  original   Generate the matched, unedited SD v1.4 arm at 50 steps
+  report     Score all three arms, mask copies, and package report artifacts
+  missing-figures  original -> report (does not rerun ESD or the attack)
   all        setup -> prepare -> preflight -> baseline -> attack -> evaluate
 
 Environment overrides:
-  ENV_NAME=$ENV_NAME  GPU0=$GPU0  GPU1=$GPU1
+  ENV_NAME=$ENV_NAME  GPU0=$GPU0  GPU1=$GPU1 (empty GPU1 = single-GPU mode)
   N_PROMPTS=$N_PROMPTS  SAMPLE_SEED=$SAMPLE_SEED  RUN_SEED=$RUN_SEED
   SUBSET_TAG=$SUBSET_TAG  CASE_LIST=$CASE_LIST
   CACHE_DIR=$CACHE_DIR  CHECKPOINT=$CHECKPOINT
@@ -116,10 +122,9 @@ setup_env() {
     conda list -n "$ENV_NAME" --explicit > "$MANIFEST_DIR/conda-explicit.txt"
     conda run -n "$ENV_NAME" python -m pip freeze > "$MANIFEST_DIR/pip-freeze.txt"
     git rev-parse HEAD > "$MANIFEST_DIR/repo-commit.txt"
-    conda_python scripts/nudity30_tools.py verify \
-        --cache-dir "$CACHE_DIR" \
-        --checkpoint "$CHECKPOINT" \
-        --require-two-gpus
+    local -a verify_args=(--cache-dir "$CACHE_DIR" --checkpoint "$CHECKPOINT")
+    [[ -n "$GPU1" ]] && verify_args+=(--require-two-gpus)
+    conda_python scripts/nudity30_tools.py verify "${verify_args[@]}"
 }
 
 select_prompts() {
@@ -151,16 +156,19 @@ prepare_images() {
         --ddim_steps 25 \
         --cache_dir "$CACHE_DIR" &
     local prepare0_pid=$!
-    CUDA_VISIBLE_DEVICES="$GPU1" conda_python src/execs/generate_dataset.py \
-        --prompts_path "${SUBSET_CSV%.csv}.shard1.csv" \
-        --concept shard1 \
-        --save_path "$WORK_DIR" \
-        --device cuda:0 \
-        --num_samples 1 \
-        --ddim_steps 25 \
-        --cache_dir "$CACHE_DIR" &
-    local prepare1_pid=$!
-    wait_for_pair "$prepare0_pid" "$prepare1_pid"
+    if [[ -n "$GPU1" ]]; then
+        CUDA_VISIBLE_DEVICES="$GPU1" conda_python src/execs/generate_dataset.py \
+            --prompts_path "${SUBSET_CSV%.csv}.shard1.csv" \
+            --concept shard1 --save_path "$WORK_DIR" --device cuda:0 \
+            --num_samples 1 --ddim_steps 25 --cache_dir "$CACHE_DIR" &
+        wait_for_pair "$prepare0_pid" "$!"
+    else
+        wait "$prepare0_pid"
+        CUDA_VISIBLE_DEVICES="$GPU0" conda_python src/execs/generate_dataset.py \
+            --prompts_path "${SUBSET_CSV%.csv}.shard1.csv" \
+            --concept shard1 --save_path "$WORK_DIR" --device cuda:0 \
+            --num_samples 1 --ddim_steps 25 --cache_dir "$CACHE_DIR"
+    fi
 
     mkdir -p "$DATASET_DIR/imgs"
     cp "$WORK_DIR/shard0/imgs/"*.png "$DATASET_DIR/imgs/"
@@ -177,12 +185,12 @@ preflight() {
         --subset "$SUBSET_CSV"
         --dataset "$DATASET_DIR"
         --expected-count "$N_PROMPTS"
-        --require-two-gpus
     )
+    [[ -n "$GPU1" ]] && verify_args+=(--require-two-gpus)
     if [[ -n "$CASE_LIST" ]]; then
         verify_args+=(--case-list "$CASE_LIST")
     fi
-    CUDA_VISIBLE_DEVICES="$GPU0,$GPU1" conda_python scripts/nudity30_tools.py verify \
+    CUDA_VISIBLE_DEVICES="${GPU0}${GPU1:+,$GPU1}" conda_python scripts/nudity30_tools.py verify \
         "${verify_args[@]}"
 }
 
@@ -249,6 +257,14 @@ run_worker() {
 run_experiment() {
     local mode="$1"
     preflight
+    if [[ -z "$GPU1" ]]; then
+        echo "Running $mode serially on GPU $GPU0"
+        local idx
+        for ((idx=0; idx<N_PROMPTS; idx++)); do
+            run_one "$mode" "$GPU0" "$idx"
+        done
+        return
+    fi
     echo "Running $mode with alternating static shards on GPUs $GPU0 and $GPU1"
     run_worker "$mode" "$GPU0" 0 &
     local worker0_pid=$!
@@ -264,6 +280,74 @@ evaluate_results() {
         --expected-count "$N_PROMPTS"
 }
 
+generate_original() {
+    select_prompts
+    local existing=0
+    if [[ -d "$ORIGINAL_ROOT/imgs" ]]; then
+        existing="$(find "$ORIGINAL_ROOT/imgs" -maxdepth 1 -type f -name '*_0.png' | wc -l)"
+    fi
+    if [[ -f "$ORIGINAL_ROOT/.done" && "$existing" -eq "$N_PROMPTS" ]]; then
+        echo "Matched original-SD arm already complete: $ORIGINAL_ROOT"
+        return
+    fi
+
+    mkdir -p "$ORIGINAL_WORK"
+    echo "Generating matched original SD v1.4 images at 50 steps..."
+    CUDA_VISIBLE_DEVICES="$GPU0" conda_python src/execs/generate_dataset.py \
+        --prompts_path "${SUBSET_CSV%.csv}.shard0.csv" \
+        --concept shard0 \
+        --save_path "$ORIGINAL_WORK" \
+        --device cuda:0 \
+        --num_samples 1 \
+        --ddim_steps 50 \
+        --cache_dir "$CACHE_DIR" &
+    local original0_pid=$!
+    if [[ -n "$GPU1" ]]; then
+        CUDA_VISIBLE_DEVICES="$GPU1" conda_python src/execs/generate_dataset.py \
+            --prompts_path "${SUBSET_CSV%.csv}.shard1.csv" \
+            --concept shard1 --save_path "$ORIGINAL_WORK" --device cuda:0 \
+            --num_samples 1 --ddim_steps 50 --cache_dir "$CACHE_DIR" &
+        wait_for_pair "$original0_pid" "$!"
+    else
+        wait "$original0_pid"
+        CUDA_VISIBLE_DEVICES="$GPU0" conda_python src/execs/generate_dataset.py \
+            --prompts_path "${SUBSET_CSV%.csv}.shard1.csv" \
+            --concept shard1 --save_path "$ORIGINAL_WORK" --device cuda:0 \
+            --num_samples 1 --ddim_steps 50 --cache_dir "$CACHE_DIR"
+    fi
+
+    mkdir -p "$ORIGINAL_ROOT/imgs"
+    cp "$ORIGINAL_WORK/shard0/imgs/"*.png "$ORIGINAL_ROOT/imgs/"
+    cp "$ORIGINAL_WORK/shard1/imgs/"*.png "$ORIGINAL_ROOT/imgs/"
+    cp "$SUBSET_CSV" "$ORIGINAL_ROOT/prompts.csv"
+    existing="$(find "$ORIGINAL_ROOT/imgs" -maxdepth 1 -type f -name '*_0.png' | wc -l)"
+    if [[ "$existing" -ne "$N_PROMPTS" ]]; then
+        echo "ERROR: original-SD arm has $existing images, expected $N_PROMPTS" >&2
+        exit 1
+    fi
+    touch "$ORIGINAL_ROOT/.done"
+}
+
+prepare_report_artifacts() {
+    conda_python -m report.prepare_existing_figures \
+        --original-root "$ORIGINAL_ROOT" \
+        --baseline-root "$BASELINE_ROOT" \
+        --attack-root "$ATTACK_ROOT" \
+        --figure-dir report/figures \
+        --expected-count "$N_PROMPTS"
+
+    local bundle="$RESULT_ROOT/report_artifacts.tar.gz"
+    tar -czf "$bundle" \
+        report/figures/generated \
+        report/figures/erasure_pairs.tex \
+        report/figures/attack_triplets.tex \
+        report/figures/detection_rates.tex \
+        report/figures/report_metrics.json \
+        "$ORIGINAL_ROOT/prompts.csv"
+    sha256sum "$bundle" > "$bundle.sha256"
+    echo "Report bundle ready: $bundle"
+}
+
 command="${1:-}"
 case "$command" in
     setup) setup_env ;;
@@ -273,6 +357,12 @@ case "$command" in
     baseline) run_experiment baseline ;;
     attack) run_experiment attack ;;
     evaluate) evaluate_results ;;
+    original) generate_original ;;
+    report) prepare_report_artifacts ;;
+    missing-figures)
+        generate_original
+        prepare_report_artifacts
+        ;;
     all)
         setup_env
         prepare_images

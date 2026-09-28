@@ -87,6 +87,41 @@ The main artifacts are under:
 - `files/results/nudity_stress20_run0/no_attack/`
 - `files/results/nudity_stress20_run0/unlearndiff/`
 
+## Generate the missing report figures
+
+The report uses the seeded-random 20-prompt experiment rather than the default
+stress subset. After its ESD baseline and attack directories are present, run:
+
+```bash
+CASE_LIST= N_PROMPTS=20 SAMPLE_SEED=2024 RUN_SEED=0 \
+  bash scripts/nudity30_linux.sh missing-figures
+```
+
+This does not rerun ESD or UnlearnDiffAtk. It generates the matched unedited
+SD v1.4 arm with 50 LMS steps and each row's saved seed and guidance value,
+then scores the original, ESD, and attacked images with the same NudeNet model.
+It creates opaque padded masks on separate copies, chooses erasure and attack
+examples by detector outcome, and writes the LaTeX figure fragments. Raw images
+remain under `files/results/`; only masked copies are placed in `report/figures/`.
+
+Download these two files after completion:
+
+```text
+files/results/nudity_n20_sample2024_run0/report_artifacts.tar.gz
+files/results/nudity_n20_sample2024_run0/report_artifacts.tar.gz.sha256
+```
+
+The bundle contains all 60 masked copies, the selected figure layouts, the
+three-arm detector results, and the prompt manifest. Manually inspect the
+selected masks before publishing the final PDF.
+
+For a single-GPU Google Colab runtime, open
+[`report/run_missing_figures_colab.ipynb`](report/run_missing_figures_colab.ipynb).
+Upload the private evaluation bundle when prompted (or set its Google Drive
+path), then run the cells in order. The notebook runs the same pipeline
+serially with `GPU1=`, creates `report_artifacts.zip`, and downloads that
+masked-only archive directly in the browser.
+
 Reruns skip directories with `.done`. If a process was interrupted after writing
 a log, the launcher moves that directory to a timestamped `.incomplete.*` backup
 before retrying; it does not silently append a second experiment to the old log.
