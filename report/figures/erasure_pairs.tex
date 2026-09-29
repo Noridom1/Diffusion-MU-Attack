@@ -1,10 +1,5 @@
-\fbox{\begin{minipage}[c][2.25in][c]{.88\linewidth}\centering
-PLACEHOLDER: matched erasure image pairs\\[1em]
-\begin{tabular}{c|c|c}
-Case ID & Original SD (masked) & ESD (masked) \\
-\hline
-success & [image] & [image] \\
-failure & [image] & [image]
-\end{tabular}\\[1em]
-Generate the original-SD arm first; retain identical prompts and seeds.
-\end{minipage}}
+\begin{tabular}{@{}c@{\hspace{.7em}}c@{\hspace{.7em}}c@{}}
+Case & Original SD & ESD \\
+\shortstack{Case 0\\erased} & \includegraphics[width=.19\textwidth]{figures/generated/original_0_masked.png} & \includegraphics[width=.19\textwidth]{figures/generated/esd_0_masked.png} \\
+\shortstack{Case 1\\residual detection} & \includegraphics[width=.19\textwidth]{figures/generated/original_1_masked.png} & \includegraphics[width=.19\textwidth]{figures/generated/esd_1_masked.png} \\
+\end{tabular}
