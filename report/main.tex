@@ -169,6 +169,11 @@ Several factors limit generalization. Twenty prompts give coarse five-percentage
 \section{Conclusion}
 ESD attempts to suppress a concept by changing diffusion-model weights. UnlearnDiffAtk probes whether an optimized prompt can still recover the target behavior. In the matched local run, broad detections changed from 20/20 on original Stable Diffusion to 7/20 on ESD and 17/20 after attack; the stricter counts were 11/20, 1/20, and 5/20. Thus ESD was effective under ordinary prompting, but the white-box attack partially restored the erased behavior. All illustrative outputs were scored before censoring and are shown only as masked copies.
 
+\appendix
+\section{Complete qualitative results}
+Figures~\ref{fig:all-cases-1}--\ref{fig:all-cases-4} show all 20 matched cases. Each row holds the prompt and generation seed fixed across original Stable Diffusion, ESD before attack, and ESD after adversarial-prefix optimization. The panels are intended for qualitative comparison only; the quantitative counts in Table~\ref{tab:results} were computed from the corresponding unmasked outputs.
+\input{figures/all_cases.tex}
+
 \section*{Remaining work before submission}
 Verify the checkpoint source and record the NudeNet package version. Manually inspect the masked report copies for missed sensitive regions, replace the author and course placeholders, and adapt the file to the required course template. The expensive generation and attack runs need not be repeated unless the protocol changes.
 
