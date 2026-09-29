@@ -152,6 +152,8 @@ def _iter_http_range(url: str, start: int, end: int):
                         f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
                     )
                 data = response.read()
+        if len(data) > expected:
+            data = data[:expected]
         if len(data) != expected:
             raise RuntimeError(
                 f"Short byte range: expected {expected} bytes, received {len(data)}"
