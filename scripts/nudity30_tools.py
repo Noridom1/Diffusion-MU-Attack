@@ -5,15 +5,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import random
-import shutil
-import subprocess
 import sys
 import struct
 import tarfile
+import time
 import urllib.request
 import zlib
 import zipfile
@@ -93,71 +93,36 @@ def _iter_http_range(url: str, start: int, end: int):
     while cursor <= end:
         chunk_end = min(cursor + MAX_HTTP_RANGE - 1, end)
         expected = chunk_end - cursor + 1
-        if shutil.which("curl"):
-            command = [
-                "curl",
-                "--silent",
-                "--show-error",
-                "--retry",
-                "20",
-                "--retry-all-errors",
-                "--retry-delay",
-                "2",
-                "--range",
-                f"{cursor}-{chunk_end}",
-                "--write-out",
-                "%{stderr}%{http_code}",
-                "--output",
-                "-",
-                url,
-            ]
-            process = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
+        for attempt in range(20):
             try:
-                assert process.stdout is not None
-                data = process.stdout.read(expected + 1)
-                if len(data) > expected:
-                    process.kill()
-                stderr = process.communicate(timeout=180)[1]
-            except subprocess.TimeoutExpired as error:
-                process.kill()
-                process.communicate()
-                raise RuntimeError(
-                    f"Timed out reading byte range {cursor}-{chunk_end}"
-                ) from error
-            if process.returncode not in (0, -9):
-                detail = stderr.decode("utf-8", "replace").strip()
-                raise RuntimeError(
-                    f"curl failed for byte range {cursor}-{chunk_end}: {detail}"
+                request = urllib.request.Request(
+                    url,
+                    headers={
+                        "Range": f"bytes={cursor}-{chunk_end}",
+                        "Accept-Encoding": "identity",
+                        "User-Agent": "Mozilla/5.0",
+                    },
                 )
-            status = stderr.decode("utf-8", "replace").strip()[-3:]
-            if status != "206":
-                raise RuntimeError(
-                    f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
-                )
-        else:
-            request = urllib.request.Request(
-                url,
-                headers={
-                    "Range": f"bytes={cursor}-{chunk_end}",
-                    "Accept-Encoding": "identity",
-                    "User-Agent": "Mozilla/5.0",
-                },
-            )
-            with urllib.request.urlopen(request, timeout=120) as response:
-                status = getattr(response, "status", response.getcode())
-                if status != 206:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    status = getattr(response, "status", response.getcode())
+                    content_range = response.headers.get("Content-Range", "")
+                    if status != 206 or content_range.partition("/")[0] != (
+                        f"bytes {cursor}-{chunk_end}"
+                    ):
+                        raise RuntimeError(
+                            f"Google Drive returned invalid range {content_range!r} "
+                            f"(HTTP {status})"
+                        )
+                    data = response.read(expected + 1)
+                if len(data) != expected:
                     raise RuntimeError(
-                        f"Google Drive did not honor byte range {cursor}-{chunk_end} (HTTP {status})"
+                        f"Byte range size mismatch: expected {expected}, received {len(data)}"
                     )
-                data = response.read()
-        if len(data) > expected:
-            data = data[:expected]
-        if len(data) != expected:
-            raise RuntimeError(
-                f"Short byte range: expected {expected} bytes, received {len(data)}"
-            )
+                break
+            except (OSError, http.client.HTTPException, RuntimeError):
+                if attempt == 19:
+                    raise
+                time.sleep(2)
         yield data
         cursor = chunk_end + 1
 
